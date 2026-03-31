@@ -2,7 +2,13 @@ name: Translate iOS PR to Android
 
 on:
   pull_request:
-    types: [opened]
+    types: [opened, synchronize]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to translate"
+        required: true
+        type: number
 
 jobs:
   translate:
@@ -12,6 +18,25 @@ jobs:
       pull-requests: read
 
     steps:
+      - name: Resolve PR details
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.ANDROID_REPO_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PR_NUMBER=${{ inputs.pr_number }}
+          else
+            PR_NUMBER=${{ github.event.pull_request.number }}
+          fi
+
+          PR_JSON=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER})
+          echo "number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "title=$(echo "$PR_JSON" | jq -r '.title')" >> "$GITHUB_OUTPUT"
+          echo "body=$(echo "$PR_JSON" | jq -r '.body // ""' | head -c 500)" >> "$GITHUB_OUTPUT"
+          echo "html_url=$(echo "$PR_JSON" | jq -r '.html_url')" >> "$GITHUB_OUTPUT"
+          echo "base_ref=$(echo "$PR_JSON" | jq -r '.base.ref')" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$(echo "$PR_JSON" | jq -r '.head.ref')" >> "$GITHUB_OUTPUT"
+
       - name: Checkout iOS repo
         uses: actions/checkout@v4
         with:
@@ -26,36 +51,31 @@ jobs:
           path: android
 
       - name: Get iOS PR diff
-        id: diff
         working-directory: ios
         run: |
-          git diff origin/${{ github.event.pull_request.base.ref }}...origin/${{ github.event.pull_request.head.ref }} > /tmp/ios-diff.patch
-          echo "pr_title=${{ github.event.pull_request.title }}" >> "$GITHUB_OUTPUT"
-          echo "pr_number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
-          echo "branch_name=translate/ios-pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          git diff origin/${{ steps.pr.outputs.base_ref }}...origin/${{ steps.pr.outputs.head_ref }} > /tmp/ios-diff.patch
 
       - name: Create Android branch
         working-directory: android
         run: |
-          git checkout -b translate/ios-pr-${{ github.event.pull_request.number }}
+          git checkout -b translate/ios-pr-${{ steps.pr.outputs.number }}
 
-      - name: Read existing Android sources
-        id: android_sources
-        run: |
-          # Collect current Android source files so ChatGPT has full context
-          android_src=""
-          for f in $(find android/sdkfoundation/src -name '*.kt' 2>/dev/null); do
-            android_src="$android_src\n--- $f ---\n$(cat "$f")\n"
-          done
-          echo "$android_src" > /tmp/android-sources.txt
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-      - name: Translate with ChatGPT
+      - name: Install GitHub Copilot CLI
+        run: npm install -g @github/copilot
+
+      - name: Translate with Copilot CLI
+        working-directory: android
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_PAT }}
         run: |
           IOS_DIFF=$(cat /tmp/ios-diff.patch)
-          ANDROID_SOURCES=$(cat /tmp/android-sources.txt)
 
+<<<<<<< HEAD
           # Build the JSON payload
           jq -n \
             --arg diff "$IOS_DIFF" \
@@ -77,30 +97,32 @@ jobs:
                 }
               ]
             }' > /tmp/openai-request.json
+=======
+          copilot -p "
+          You are translating iOS (Swift) changes to Android (Kotlin).
+>>>>>>> bb2bb48 (Update pipeline)
 
-          # Call OpenAI API
-          RESPONSE=$(curl -s https://api.openai.com/v1/chat/completions \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $OPENAI_API_KEY" \
-            -d @/tmp/openai-request.json)
+          An iOS pull request has been opened: \"${{ steps.pr.outputs.title }}\"
+          PR description: \"${{ steps.pr.outputs.body }}\"
 
-          # Extract the content from the response
-          echo "$RESPONSE" | jq -r '.choices[0].message.content' > /tmp/openai-result.json
+          Here is the iOS diff:
+          \`\`\`
+          $IOS_DIFF
+          \`\`\`
 
-          # Check for errors
-          if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
-            echo "OpenAI API error:"
-            echo "$RESPONSE" | jq '.error'
-            exit 1
-          fi
+          Translation rules:
+          - Swift struct: Codable → Kotlin @Serializable data class
+          - Swift let properties → Kotlin val properties
+          - Swift import Foundation → Kotlin import kotlinx.serialization.Serializable
+          - Swift Testing @Test func → Kotlin JUnit @Test fun
+          - Swift #expect(x == y) → Kotlin assertEquals(y, x)
+          - iOS source files in Sources/SDKFoundation/ → Android sources in sdkfoundation/src/main/java/com/sdkfoundation/
+          - iOS test files in Tests/SDKFoundationTests/ → Android tests in sdkfoundation/src/test/java/com/sdkfoundation/
+          - All Kotlin files must have package com.sdkfoundation at the top
+          - Preserve the same file names but use .kt extension instead of .swift
 
-          # Write each file from the JSON response
-          for filepath in $(jq -r 'keys[]' /tmp/openai-result.json); do
-            dir=$(dirname "android/$filepath")
-            mkdir -p "$dir"
-            jq -r --arg key "$filepath" '.[$key]' /tmp/openai-result.json > "android/$filepath"
-            echo "Wrote: android/$filepath"
-          done
+          Apply the equivalent changes to this Android project. Create or modify the necessary Kotlin files.
+          " --allow-tool='write,read,shell(find:*),shell(cat:*)'
 
       - name: Push Android branch and create PR
         working-directory: android
@@ -117,31 +139,31 @@ jobs:
 
           git add -A
           git commit -m "$(cat <<EOF
-          Translate iOS PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}
+          Translate iOS PR #${{ steps.pr.outputs.number }}: ${{ steps.pr.outputs.title }}
 
-          Automated translation from sdkdev/iOS-SDKFoundation#${{ github.event.pull_request.number }}
+          Automated translation from sdkdev/iOS-SDKFoundation#${{ steps.pr.outputs.number }}
 
-          Co-Authored-By: ChatGPT <noreply@openai.com>
+          Co-Authored-By: GitHub Copilot <noreply@github.com>
           EOF
           )"
 
-          git push -u origin translate/ios-pr-${{ github.event.pull_request.number }}
+          git push -u origin translate/ios-pr-${{ steps.pr.outputs.number }}
 
           gh pr create \
             --repo sdkdev/android-SDKFoundation \
-            --title "Translate iOS PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}" \
+            --title "Translate iOS PR #${{ steps.pr.outputs.number }}: ${{ steps.pr.outputs.title }}" \
             --body "$(cat <<EOF
           ## Summary
 
-          Automated translation of iOS changes from sdkdev/iOS-SDKFoundation#${{ github.event.pull_request.number }}.
+          Automated translation of iOS changes from sdkdev/iOS-SDKFoundation#${{ steps.pr.outputs.number }}.
 
-          **Original iOS PR:** ${{ github.event.pull_request.html_url }}
+          **Original iOS PR:** ${{ steps.pr.outputs.html_url }}
 
           ## What was translated
 
-          ${{ github.event.pull_request.body }}
+          ${{ steps.pr.outputs.body }}
 
           ---
-          🤖 Generated by ChatGPT via GitHub Actions
+          🤖 Generated by GitHub Copilot via GitHub Actions
           EOF
           )"
