@@ -32,10 +32,10 @@ jobs:
           PR_JSON=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER})
           echo "number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "title=$(echo "$PR_JSON" | jq -r '.title')" >> "$GITHUB_OUTPUT"
-          echo "body=$(echo "$PR_JSON" | jq -r '.body // ""' | head -c 500)" >> "$GITHUB_OUTPUT"
           echo "html_url=$(echo "$PR_JSON" | jq -r '.html_url')" >> "$GITHUB_OUTPUT"
           echo "base_ref=$(echo "$PR_JSON" | jq -r '.base.ref')" >> "$GITHUB_OUTPUT"
           echo "head_ref=$(echo "$PR_JSON" | jq -r '.head.ref')" >> "$GITHUB_OUTPUT"
+          echo "$PR_JSON" | jq -r '.body // ""' > /tmp/pr-body.txt
 
       - name: Checkout iOS repo
         uses: actions/checkout@v4
@@ -74,55 +74,36 @@ jobs:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_PAT }}
         run: |
           IOS_DIFF=$(cat /tmp/ios-diff.patch)
+          PR_BODY=$(cat /tmp/pr-body.txt)
 
-<<<<<<< HEAD
-          # Build the JSON payload
-          jq -n \
-            --arg diff "$IOS_DIFF" \
-            --arg sources "$ANDROID_SOURCES" \
-            --arg title "${{ github.event.pull_request.title }}" \
-            --arg body "${{ github.event.pull_request.body }}" \
-            '{
-              model: "gpt-5.4",
-              temperature: 0,
-              response_format: { type: "json_object" },
-              messages: [
-                {
-                  role: "system",
-                  content: "You translate iOS (Swift) code changes to Android (Kotlin). You receive a git diff from an iOS Swift project and the current Android Kotlin source files. Return a JSON object where each key is a file path relative to the android/ directory and each value is the full updated file content.\n\nTranslation rules:\n- Swift `struct: Codable` → Kotlin `@Serializable data class`\n- Swift `let` properties → Kotlin `val` properties\n- Swift `import Foundation` → Kotlin `import kotlinx.serialization.Serializable`\n- Swift Testing `@Test func` → Kotlin JUnit `@Test fun`\n- Swift `#expect(x == y)` → Kotlin `assertEquals(y, x)`\n- iOS source files in Sources/SDKFoundation/ → Android sources in sdkfoundation/src/main/java/com/sdkfoundation/\n- iOS test files in Tests/SDKFoundationTests/ → Android tests in sdkfoundation/src/test/java/com/sdkfoundation/\n- All Kotlin files must have `package com.sdkfoundation` at the top\n- Preserve the same file names (but use .kt extension instead of .swift)\n\nOnly include files that need to be created or modified. Return valid JSON only."
-                },
-                {
-                  role: "user",
-                  content: ("iOS PR: \"" + $title + "\"\nDescription: " + $body + "\n\n--- iOS Diff ---\n" + $diff + "\n\n--- Current Android Sources ---\n" + $sources)
-                }
-              ]
-            }' > /tmp/openai-request.json
-=======
-          copilot -p "
+          cat > /tmp/translate-prompt.txt <<'PROMPT'
           You are translating iOS (Swift) changes to Android (Kotlin).
->>>>>>> bb2bb48 (Update pipeline)
-
-          An iOS pull request has been opened: \"${{ steps.pr.outputs.title }}\"
-          PR description: \"${{ steps.pr.outputs.body }}\"
-
-          Here is the iOS diff:
-          \`\`\`
-          $IOS_DIFF
-          \`\`\`
 
           Translation rules:
-          - Swift struct: Codable → Kotlin @Serializable data class
-          - Swift let properties → Kotlin val properties
-          - Swift import Foundation → Kotlin import kotlinx.serialization.Serializable
-          - Swift Testing @Test func → Kotlin JUnit @Test fun
-          - Swift #expect(x == y) → Kotlin assertEquals(y, x)
-          - iOS source files in Sources/SDKFoundation/ → Android sources in sdkfoundation/src/main/java/com/sdkfoundation/
-          - iOS test files in Tests/SDKFoundationTests/ → Android tests in sdkfoundation/src/test/java/com/sdkfoundation/
+          - Swift struct: Codable -> Kotlin @Serializable data class
+          - Swift let properties -> Kotlin val properties
+          - Swift import Foundation -> Kotlin import kotlinx.serialization.Serializable
+          - Swift Testing @Test func -> Kotlin JUnit @Test fun
+          - Swift #expect(x == y) -> Kotlin assertEquals(y, x)
+          - iOS source files in Sources/SDKFoundation/ -> Android sources in sdkfoundation/src/main/java/com/sdkfoundation/
+          - iOS test files in Tests/SDKFoundationTests/ -> Android tests in sdkfoundation/src/test/java/com/sdkfoundation/
           - All Kotlin files must have package com.sdkfoundation at the top
           - Preserve the same file names but use .kt extension instead of .swift
 
           Apply the equivalent changes to this Android project. Create or modify the necessary Kotlin files.
-          " --allow-tool='write,read,shell(find:*),shell(cat:*)'
+          PROMPT
+
+          {
+            echo ""
+            echo "iOS PR title: ${{ steps.pr.outputs.title }}"
+            echo "iOS PR description: ${PR_BODY}"
+            echo ""
+            echo "iOS diff:"
+            echo "${IOS_DIFF}"
+          } >> /tmp/translate-prompt.txt
+
+          copilot -p "$(cat /tmp/translate-prompt.txt)" \
+            --allow-tool='write,read,shell(find:*),shell(cat:*)'
 
       - name: Push Android branch and create PR
         working-directory: android
@@ -137,6 +118,8 @@ jobs:
             exit 0
           fi
 
+          PR_BODY=$(cat /tmp/pr-body.txt)
+
           git add -A
           git commit -m "$(cat <<EOF
           Translate iOS PR #${{ steps.pr.outputs.number }}: ${{ steps.pr.outputs.title }}
@@ -147,12 +130,20 @@ jobs:
           EOF
           )"
 
-          git push -u origin translate/ios-pr-${{ steps.pr.outputs.number }}
+          git push --force -u origin translate/ios-pr-${{ steps.pr.outputs.number }}
 
-          gh pr create \
+          EXISTING_PR=$(gh pr list \
             --repo sdkdev/android-SDKFoundation \
-            --title "Translate iOS PR #${{ steps.pr.outputs.number }}: ${{ steps.pr.outputs.title }}" \
-            --body "$(cat <<EOF
+            --head translate/ios-pr-${{ steps.pr.outputs.number }} \
+            --json number --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING_PR" ]; then
+            echo "Android PR #${EXISTING_PR} already exists, updated via force push."
+          else
+            gh pr create \
+              --repo sdkdev/android-SDKFoundation \
+              --title "Translate iOS PR #${{ steps.pr.outputs.number }}: ${{ steps.pr.outputs.title }}" \
+              --body "$(cat <<EOF
           ## Summary
 
           Automated translation of iOS changes from sdkdev/iOS-SDKFoundation#${{ steps.pr.outputs.number }}.
@@ -161,9 +152,10 @@ jobs:
 
           ## What was translated
 
-          ${{ steps.pr.outputs.body }}
+          ${PR_BODY}
 
           ---
           🤖 Generated by GitHub Copilot via GitHub Actions
           EOF
           )"
+          fi
