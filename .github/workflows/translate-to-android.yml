@@ -63,7 +63,7 @@ jobs:
             --arg title "${{ github.event.pull_request.title }}" \
             --arg body "${{ github.event.pull_request.body }}" \
             '{
-              model: "gpt5.4",
+              model: "gpt-5.4",
               temperature: 0,
               response_format: { type: "json_object" },
               messages: [
