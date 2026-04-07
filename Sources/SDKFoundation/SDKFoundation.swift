@@ -7,8 +7,14 @@ public struct User: Codable {
     let firstName: String
     let lastName: String
     
+    
+    
     public init(firstName: String, lastName: String) {
         self.firstName = firstName
         self.lastName = lastName
+    }
+    
+    public func getFullName() -> String {
+        return "\(firstName) \(lastName)"
     }
 }
